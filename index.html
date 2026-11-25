@@ -489,6 +489,7 @@ function weekView(){
   if(ins)h+='<p class="insight">'+ins+'</p>';
   var rv=reviewOf(ui.sel),sunday=parse(TODAY).getDay()===0&&mondayOf(ui.sel)===mondayOf(TODAY);
   h+='<section class="card"><h3 style="font-size:17px;margin-bottom:4px">Weekly review</h3><p class="note" style="margin:0 0 12px">'+(rv&&rv.note?'Your intention: '+esc(rv.note):(sunday?'It is Sunday, a good time to look back and set one intention for next week.':'Look back on this week and set one intention for the next.'))+'</p><button class="btn'+(rv?' alt':'')+'" data-act="review">'+(rv?'Edit review':'Start review')+'</button></section>';
+  h+='<section class="card"><h3 style="font-size:17px;margin-bottom:4px">Calendar reminders</h3><p class="note" style="margin:0 0 12px">Optional. Add your windows or tasks to your phone\'s Calendar to get reminders when this app is closed.</p><button class="btn alt" data-act="cal">Set up reminders</button></section>';
   return h+'</div>';
 }
 
@@ -560,6 +561,56 @@ function winsSheet(){
   h+='<button class="btn alt" data-act="addwin" style="width:100%">'+ICON.plus+'Add window</button><div class="lbl">Your data lives on this phone</div><div class="chips"><button class="chip" data-act="export">Download backup</button><label class="chip" for="f-import">Restore backup</label><input type="file" id="f-import" accept="application/json,.json" hidden></div><div class="actions"><button class="btn grow" data-act="closesheet">Done</button></div>';
   return h;
 }
+/* optional calendar reminders: builds an .ics file the phone's Calendar app can import */
+function calOpts(){return Object.assign({scope:'week',mode:'window',before:10,nudge:false},S.cal||{})}
+function calDT(d,min){min=Math.max(0,Math.min(1439,Math.round(min)));return d.replace(/-/g,'')+'T'+pad(Math.floor(min/60))+pad(min%60)+'00'}
+function calEvents(o){
+  var days=o.scope==='today'?[TODAY]:weekDays(ui.sel).filter(function(d){return d>=TODAY});
+  var ev=[];
+  days.forEach(function(d){
+    var ts=tasksOn(d).filter(function(t){return !t.done});
+    sortedWins().forEach(function(w){
+      var wt=ts.filter(function(t){return t.win===w.id});
+      if(!wt.length)return;
+      if(o.mode==='window'){
+        ev.push({uid:d+'-'+w.id,sum:w.name,start:calDT(d,toMin(w.start)),end:calDT(d,toMin(w.end)),before:o.before,
+          desc:wt.map(function(t){return '- '+t.title+' ('+fmtDur(t.est)+')'}).join('\n')});
+      }else{
+        var cur=toMin(w.start);
+        wt.forEach(function(t){ev.push({uid:t.id+'-'+d,sum:t.title,start:calDT(d,cur),end:calDT(d,cur+t.est),before:o.before,desc:w.name+' · '+fmtDur(t.est)});cur+=t.est});
+      }
+    });
+    if(o.nudge)ev.push({uid:'nudge-'+d,sum:'Plan tomorrow',start:calDT(d,20*60),end:calDT(d,20*60+15),before:0,desc:'Open your planner and place tomorrow\'s tasks in their windows.'});
+  });
+  return ev;
+}
+function icsEsc(s){return String(s).replace(/\\/g,'\\\\').replace(/;/g,'\\;').replace(/,/g,'\\,').replace(/\r?\n/g,'\\n')}
+function icsFold(l){var out=[];while(l.length>60){out.push(l.slice(0,60));l=' '+l.slice(60)}out.push(l);return out.join('\r\n')}
+function buildICS(ev){
+  var stamp=new Date().toISOString().replace(/[-:]/g,'').replace(/\.\d+/,'');
+  var L=['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//Weekly Planner//EN','CALSCALE:GREGORIAN','METHOD:PUBLISH'];
+  ev.forEach(function(e){
+    L.push('BEGIN:VEVENT','UID:'+e.uid+'@weekly-planner','DTSTAMP:'+stamp,'DTSTART:'+e.start,'DTEND:'+e.end,'SUMMARY:'+icsEsc(e.sum),'DESCRIPTION:'+icsEsc(e.desc),
+      'BEGIN:VALARM','ACTION:DISPLAY','DESCRIPTION:'+icsEsc(e.sum),'TRIGGER:'+(e.before?'-PT'+e.before+'M':'PT0S'),'END:VALARM','END:VEVENT');
+  });
+  L.push('END:VCALENDAR');
+  return L.map(icsFold).join('\r\n')+'\r\n';
+}
+function calSheet(){
+  var o=calOpts(),n=calEvents(o).length;
+  var chip=function(k,v,label,on){return '<button class="chip" data-act="calopt" data-k="'+k+'" data-v="'+v+'" aria-pressed="'+on+'">'+label+'</button>'};
+  var canShare=false;try{canShare=!!(navigator.canShare&&navigator.canShare({files:[new File(['x'],'a.ics',{type:'text/calendar'})]}))}catch(e){}
+  var h='<h2>Calendar reminders</h2><p class="muted" style="margin-bottom:6px">Optional. This makes a file your phone\'s Calendar app can import, so it reminds you even when this app is closed. Tasks without a window are left out.</p>';
+  h+='<div class="lbl">Which days</div><div class="chips">'+chip('scope','today','Today only',o.scope==='today')+chip('scope','week','Rest of this week',o.scope==='week')+'</div>';
+  h+='<div class="lbl">What to add</div><div class="chips">'+chip('mode','window','One event per window',o.mode==='window')+chip('mode','task','One event per task',o.mode==='task')+'</div>';
+  h+='<div class="lbl">Remind me</div><div class="chips">'+[[0,'At the start'],[5,'5 min before'],[10,'10 min before'],[15,'15 min before'],[30,'30 min before']].map(function(x){return chip('before',x[0],x[1],o.before===x[0])}).join('')+'</div>';
+  h+='<div class="lbl">Extra</div><div class="chips">'+chip('nudge','toggle','Evening nudge at 20:00 to plan tomorrow',o.nudge)+'</div>';
+  h+='<p class="hint'+(n?'':' over')+'">'+(n?n+(n===1?' event':' events')+' will be in the file. Importing it again later updates them instead of duplicating.':'Nothing to add yet. Plan some tasks into windows first.')+'</p>';
+  h+='<div class="actions"><button class="btn alt" data-act="closesheet">Close</button><button class="btn grow" data-act="caldl"'+(n?'':' disabled')+'>Download file</button></div>';
+  if(canShare)h+='<button class="btn alt" data-act="calshare" style="width:100%;margin-top:10px"'+(n?'':' disabled')+'>Share to Calendar</button>';
+  h+='<p class="hint">After downloading, open the .ics file on your phone and choose to add the events to your calendar.</p>';
+  return h;
+}
 function reviewSheet(){
   var d=sheet.d,w=weekSummary(ui.sel),prev=S.reviews[addDays(mondayOf(ui.sel),-7)];
   var h='<h2>Week review</h2><p class="muted" style="margin-bottom:12px">'+esc(weekLabel(ui.sel))+'</p>';
@@ -586,7 +637,7 @@ function renderSheet(){
   var el=$('#sheet');
   if(!sheet){el.innerHTML='';document.documentElement.style.overflow='';return}
   var old=el.querySelector('.sheet'),st=old?old.scrollTop:0;
-  el.innerHTML='<div class="scrim" data-act="closesheet"></div><div class="sheet" role="dialog" aria-modal="true"><div class="in"><div class="grab"></div>'+(sheet.kind==='task'?taskSheet():sheet.kind==='wins'?winsSheet():sheet.kind==='review'?reviewSheet():subjSheet())+'</div></div>';
+  el.innerHTML='<div class="scrim" data-act="closesheet"></div><div class="sheet" role="dialog" aria-modal="true"><div class="in"><div class="grab"></div>'+(sheet.kind==='task'?taskSheet():sheet.kind==='wins'?winsSheet():sheet.kind==='review'?reviewSheet():sheet.kind==='cal'?calSheet():subjSheet())+'</div></div>';
   var n=el.querySelector('.sheet');n.scrollTop=st;
   document.documentElement.style.overflow='hidden';
 }
@@ -696,6 +747,25 @@ document.addEventListener('click',function(ev){
   else if(a==='focusadd'){focusAdd()}
   else if(a==='focusdone'){focusDone()}
   else if(a==='focusexit'){closeFocus()}
+  else if(a==='cal'){sheet={kind:'cal'};renderSheet()}
+  else if(a==='calopt'){
+    var co=calOpts(),ck=b.dataset.k,cv=b.dataset.v;
+    co[ck]=ck==='before'?+cv:ck==='nudge'?!co.nudge:cv;
+    S.cal=co;save();renderSheet();
+  }
+  else if(a==='caldl'||a==='calshare'){
+    var ics=buildICS(calEvents(calOpts())),fname='weekly-planner-reminders.ics';
+    try{
+      if(a==='calshare'){
+        var file=new File([ics],fname,{type:'text/calendar'});
+        navigator.share({files:[file],title:'Planner reminders'}).catch(function(){});
+      }else{
+        var cb=new Blob([ics],{type:'text/calendar'}),cu=URL.createObjectURL(cb),cl=document.createElement('a');
+        cl.href=cu;cl.download=fname;document.body.appendChild(cl);cl.click();cl.remove();
+        setTimeout(function(){URL.revokeObjectURL(cu)},4000);toast('Calendar file downloaded');
+      }
+    }catch(e){toast('Could not create the calendar file')}
+  }
   else if(a==='review'){sheet={kind:'review',d:{note:(reviewOf(ui.sel)||{}).note||''}};renderSheet()}
   else if(a==='savereview'||a==='savereviewnext'){
     var rmon=mondayOf(ui.sel);
